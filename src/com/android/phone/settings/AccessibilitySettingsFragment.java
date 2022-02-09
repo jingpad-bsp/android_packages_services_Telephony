@@ -64,7 +64,7 @@ public class AccessibilitySettingsFragment extends PreferenceFragment {
                         (TelephonyManager) mContext.getSystemService(Context.TELEPHONY_SERVICE);
                 final boolean isVolteTtySupported = getVolteTtySupported();
                 final boolean isVolteCurrentlyEnabled =
-                        ImsManager.isVolteEnabledByPlatform(mContext);
+                        (ImsManager.isVolteEnabledByPlatform(mContext) || ImsManager.isWfcEnabledByPlatform(mContext)); //UNISOC: modify for bug1174972
                 pref.setEnabled((isVolteTtySupported && isVolteCurrentlyEnabled &&
                         !isVideoCallOrConferenceInProgress()) ||
                         (telephonyManager.getCallState() == TelephonyManager.CALL_STATE_IDLE));

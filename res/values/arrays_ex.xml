@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="nck_simlock_item_array">
+        <item>Lock</item>
+        <item>UnLock</item>
+    </string-array>
+</resources>

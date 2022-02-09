@@ -106,6 +106,7 @@ import android.telephony.ims.stub.ImsConfigImplBase;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 import android.text.TextUtils;
 import android.util.ArraySet;
+import android.util.EventLog;
 import android.util.Log;
 import android.util.Pair;
 import android.util.Slog;
@@ -113,6 +114,7 @@ import android.util.Slog;
 import com.android.ims.ImsException;
 import com.android.ims.ImsManager;
 import com.android.ims.internal.IImsServiceFeatureCallback;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.CallStateException;
 import com.android.internal.telephony.CarrierInfoManager;
@@ -149,6 +151,7 @@ import com.android.internal.telephony.emergency.EmergencyNumberTracker;
 import com.android.internal.telephony.euicc.EuiccConnector;
 import com.android.internal.telephony.ims.ImsResolver;
 import com.android.internal.telephony.metrics.TelephonyMetrics;
+import com.android.internal.telephony.TeleUtils;
 import com.android.internal.telephony.uicc.IccIoResult;
 import com.android.internal.telephony.uicc.IccUtils;
 import com.android.internal.telephony.uicc.SIMRecords;
@@ -840,18 +843,53 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
                     break;
 
                 case CMD_GET_MODEM_ACTIVITY_INFO:
+                    log("CMD_GET_MODEM_ACTIVITY_INFO ");
                     request = (MainThreadRequest) msg.obj;
                     onCompleted = obtainMessage(EVENT_GET_MODEM_ACTIVITY_INFO_DONE, request);
                     if (defaultPhone != null) {
                         defaultPhone.getModemActivityInfo(onCompleted, request.workSource);
+                    } else {
+                        ResultReceiver result = (ResultReceiver) request.argument;
+                        Bundle bundle = new Bundle();
+                        bundle.putParcelable(TelephonyManager.MODEM_ACTIVITY_RESULT_KEY,
+                                new ModemActivityInfo(0, 0, 0, new int[0], 0, 0));
+                        result.send(0, bundle);
                     }
                     break;
 
                 case EVENT_GET_MODEM_ACTIVITY_INFO_DONE:
+                    log("EVENT_GET_MODEM_ACTIVITY_INFO_DONE ");
                     ar = (AsyncResult) msg.obj;
                     request = (MainThreadRequest) ar.userObj;
+                    ResultReceiver result = (ResultReceiver) request.argument;
+
+                    ModemActivityInfo ret = new ModemActivityInfo(0, 0, 0, new int[0], 0, 0);
                     if (ar.exception == null && ar.result != null) {
-                        request.result = ar.result;
+                        // Update the last modem activity info and the result of the request.
+                        ModemActivityInfo info = (ModemActivityInfo) ar.result;
+                        if (isModemActivityInfoValid(info)) {
+                            int[] mergedTxTimeMs = new int[ModemActivityInfo.TX_POWER_LEVELS];
+                            for (int i = 0; i < mergedTxTimeMs.length; i++) {
+                                mergedTxTimeMs[i] = info.getTxTimeMillis()[i] +
+                                        mLastModemActivityInfo.getTxTimeMillis()[i];
+                            }
+                            mLastModemActivityInfo.setTimestamp(info.getTimestamp());
+                            mLastModemActivityInfo.setSleepTimeMillis(info.getSleepTimeMillis()
+                                    + mLastModemActivityInfo.getSleepTimeMillis());
+                            mLastModemActivityInfo.setIdleTimeMillis(
+                                    info.getIdleTimeMillis() + mLastModemActivityInfo.getIdleTimeMillis());
+                            mLastModemActivityInfo.setTxTimeMillis(mergedTxTimeMs);
+                            mLastModemActivityInfo.setRxTimeMillis(
+                                    info.getRxTimeMillis() + mLastModemActivityInfo.getRxTimeMillis());
+                            mLastModemActivityInfo.setEnergyUsed(
+                                    info.getEnergyUsed() + mLastModemActivityInfo.getEnergyUsed());
+                        }
+                        ret = new ModemActivityInfo(mLastModemActivityInfo.getTimestamp(),
+                                mLastModemActivityInfo.getSleepTimeMillis(),
+                                mLastModemActivityInfo.getIdleTimeMillis(),
+                                mLastModemActivityInfo.getTxTimeMillis(),
+                                mLastModemActivityInfo.getRxTimeMillis(),
+                                mLastModemActivityInfo.getEnergyUsed());
                     } else {
                         if (ar.result == null) {
                             loge("queryModemActivityInfo: Empty response");
@@ -862,10 +900,10 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
                             loge("queryModemActivityInfo: Unknown exception");
                         }
                     }
-                    // Result cannot be null. Return ModemActivityInfo with all fields set to 0.
-                    if (request.result == null) {
-                        request.result = new ModemActivityInfo(0, 0, 0, null, 0, 0);
-                    }
+                    Bundle bundle = new Bundle();
+                    bundle.putParcelable(TelephonyManager.MODEM_ACTIVITY_RESULT_KEY, ret);
+                    result.send(0, bundle);
+
                     notifyRequester(request);
                     break;
 
@@ -1319,7 +1357,8 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     }
 
     /** Private constructor; @see init() */
-    private PhoneInterfaceManager(PhoneGlobals app) {
+    @VisibleForTesting
+    /* package */ PhoneInterfaceManager(PhoneGlobals app) {
         mApp = app;
         mCM = PhoneGlobals.getInstance().mCM;
         mUserManager = (UserManager) app.getSystemService(Context.USER_SERVICE);
@@ -1539,6 +1578,12 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
                                                 ((CommandException)(ar.exception)).getCommandError()
                                                 == CommandException.Error.PASSWORD_INCORRECT) {
                                             mResult = PhoneConstants.PIN_PASSWORD_INCORRECT;
+                                        }  //When UiccCardApp dispose,handle message and return exception
+                                        else if (ar.exception instanceof CommandException &&
+                                                ((CommandException) (ar.exception)).getCommandError()
+                                                        == CommandException.Error.UICC_CARD_APPLICATION_DISPOSED) {
+                                            int PIN_UICC_DISPOSS_FAILURE = 3;
+                                            mResult = PIN_UICC_DISPOSS_FAILURE;
                                         } else {
                                             mResult = PhoneConstants.PIN_GENERAL_FAILURE;
                                         }
@@ -1913,6 +1958,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
                                 .setCallingPid(Binder.getCallingPid())
                                 .setCallingUid(Binder.getCallingUid())
                                 .setMethod("getCellLocation")
+                                .setMinSdkVersionForCoarse(Build.VERSION_CODES.BASE)
                                 .setMinSdkVersionForFine(Build.VERSION_CODES.Q)
                                 .build());
         switch (locationResult) {
@@ -2089,7 +2135,10 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
         final int targetSdk = getTargetSdk(callingPackage);
         if (targetSdk >= android.os.Build.VERSION_CODES.Q) {
-            return getCachedCellInfo();
+            List<CellInfo> cellInfo = getCachedCellInfo();
+            if (cellInfo != null && cellInfo.size() > 0) {
+                return cellInfo;
+            }
         }
 
         if (DBG_LOC) log("getAllCellInfo: is active user");
@@ -2133,12 +2182,21 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
                                 .setCallingPid(Binder.getCallingPid())
                                 .setCallingUid(Binder.getCallingUid())
                                 .setMethod("requestCellInfoUpdate")
-                                .setMinSdkVersionForFine(Build.VERSION_CODES.Q)
+                                .setMinSdkVersionForCoarse(Build.VERSION_CODES.BASE)
+                                .setMinSdkVersionForFine(Build.VERSION_CODES.BASE)
                                 .build());
         switch (locationResult) {
             case DENIED_HARD:
+                if (getTargetSdk(callingPackage) < Build.VERSION_CODES.Q) {
+                    // Safetynet logging for b/154934934
+                    EventLog.writeEvent(0x534e4554, "154934934", Binder.getCallingUid());
+                }
                 throw new SecurityException("Not allowed to access cell info");
             case DENIED_SOFT:
+                if (getTargetSdk(callingPackage) < Build.VERSION_CODES.Q) {
+                    // Safetynet logging for b/154934934
+                    EventLog.writeEvent(0x534e4554, "154934934", Binder.getCallingUid());
+                }
                 try {
                     cb.onCellInfo(new ArrayList<CellInfo>());
                 } catch (RemoteException re) {
@@ -4634,6 +4692,11 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
             if (phone != null) {
                 if (DBG) log("setUserDataEnabled: subId=" + subId + " enable=" + enable);
                 phone.getDataEnabledSettings().setUserDataEnabled(enable);
+                //UNISOC:Fix bug 1096892,the data sub's master switch should be consistent with the data sub's switch.
+                if (subId == SubscriptionManager.getDefaultDataSubscriptionId()) {
+                    Settings.Global.putInt(phone.getContext().getContentResolver(),
+                            Settings.Global.MOBILE_DATA + SubscriptionManager.MAX_SUBSCRIPTION_ID_VALUE, enable ? 1 : 0);
+                }
             } else {
                 loge("setUserDataEnabled: no phone found. Invalid subId=" + subId);
             }
@@ -5503,38 +5566,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
         final long identity = Binder.clearCallingIdentity();
         try {
-            ModemActivityInfo ret = null;
-            synchronized (mLastModemActivityInfo) {
-                ModemActivityInfo info = (ModemActivityInfo) sendRequest(
-                        CMD_GET_MODEM_ACTIVITY_INFO,
-                        null, workSource);
-                if (isModemActivityInfoValid(info)) {
-                    int[] mergedTxTimeMs = new int[ModemActivityInfo.TX_POWER_LEVELS];
-                    for (int i = 0; i < mergedTxTimeMs.length; i++) {
-                        mergedTxTimeMs[i] = info.getTxTimeMillis()[i]
-                                + mLastModemActivityInfo.getTxTimeMillis()[i];
-                    }
-                    mLastModemActivityInfo.setTimestamp(info.getTimestamp());
-                    mLastModemActivityInfo.setSleepTimeMillis(info.getSleepTimeMillis()
-                            + mLastModemActivityInfo.getSleepTimeMillis());
-                    mLastModemActivityInfo.setIdleTimeMillis(
-                            info.getIdleTimeMillis() + mLastModemActivityInfo.getIdleTimeMillis());
-                    mLastModemActivityInfo.setTxTimeMillis(mergedTxTimeMs);
-                    mLastModemActivityInfo.setRxTimeMillis(
-                            info.getRxTimeMillis() + mLastModemActivityInfo.getRxTimeMillis());
-                    mLastModemActivityInfo.setEnergyUsed(
-                            info.getEnergyUsed() + mLastModemActivityInfo.getEnergyUsed());
-                }
-                ret = new ModemActivityInfo(mLastModemActivityInfo.getTimestamp(),
-                        mLastModemActivityInfo.getSleepTimeMillis(),
-                        mLastModemActivityInfo.getIdleTimeMillis(),
-                        mLastModemActivityInfo.getTxTimeMillis(),
-                        mLastModemActivityInfo.getRxTimeMillis(),
-                        mLastModemActivityInfo.getEnergyUsed());
-            }
-            Bundle bundle = new Bundle();
-            bundle.putParcelable(TelephonyManager.MODEM_ACTIVITY_RESULT_KEY, ret);
-            result.send(0, bundle);
+            sendRequestAsync(CMD_GET_MODEM_ACTIVITY_INFO, result, null, workSource);
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
@@ -6325,6 +6357,10 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
 
     @Override
     public List<UiccCardInfo> getUiccCardsInfo(String callingPackage) {
+        // Verify that tha callingPackage belongs to the calling UID
+        mApp.getSystemService(AppOpsManager.class)
+                .checkPackage(Binder.getCallingUid(), callingPackage);
+
         boolean hasReadPermission = false;
         try {
             enforceReadPrivilegedPermission("getUiccCardsInfo");

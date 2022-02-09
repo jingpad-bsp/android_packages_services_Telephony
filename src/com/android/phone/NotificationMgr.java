@@ -350,7 +350,8 @@ public class NotificationMgr {
             }
 
             PendingIntent pendingIntent =
-                    PendingIntent.getActivity(mContext, subId /* requestCode */, intent, 0);
+                    PendingIntent.getActivity(mContext, subId /* requestCode */, intent,
+                            PendingIntent.FLAG_IMMUTABLE);
 
             Resources res = mContext.getResources();
             PersistableBundle carrierConfig = PhoneGlobals.getInstance().getCarrierConfigForSubId(
@@ -394,7 +395,8 @@ public class NotificationMgr {
                 if (!mUserManager.hasUserRestriction(
                         UserManager.DISALLOW_OUTGOING_CALLS, userHandle)
                         && !user.isManagedProfile()) {
-                    if (!maybeSendVoicemailNotificationUsingDefaultDialer(phone, 0, null, null,
+                    //UNISOC: add for bug1094342
+                    if (phone == null || !maybeSendVoicemailNotificationUsingDefaultDialer(phone, 0, null, null,
                             false, userHandle, isRefresh)) {
                         mNotificationManager.cancelAsUser(
                                 Integer.toString(subId) /* tag */,
@@ -539,7 +541,7 @@ public class NotificationMgr {
             SubscriptionInfoHelper.addExtrasToIntent(
                     intent, mSubscriptionManager.getActiveSubscriptionInfo(subId));
             builder.setContentIntent(PendingIntent.getActivity(mContext, subId /* requestCode */,
-                    intent, 0));
+                    intent, PendingIntent.FLAG_IMMUTABLE));
             mNotificationManager.notifyAsUser(
                     Integer.toString(subId) /* tag */,
                     CALL_FORWARD_NOTIFICATION,
@@ -571,7 +573,8 @@ public class NotificationMgr {
         // "Mobile network settings" screen / dialog
         Intent intent = new Intent(Settings.ACTION_DATA_ROAMING_SETTINGS);
         intent.putExtra(Settings.EXTRA_SUB_ID, subId);
-        PendingIntent contentIntent = PendingIntent.getActivity(mContext, subId, intent, 0);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+                mContext, subId, intent, PendingIntent.FLAG_IMMUTABLE);
 
         final CharSequence contentText = mContext.getText(R.string.roaming_reenable_message);
 
@@ -603,7 +606,13 @@ public class NotificationMgr {
      */
     private void showNetworkSelection(String operator, int subId) {
         if (DBG) log("showNetworkSelection(" + operator + ")...");
-
+        /* UNISOC: Bug1133434 Not display notification if subId is inactive or
+         * the selected operator is empty @{ */
+        if (!mSubscriptionManager.isActiveSubId(subId) || TextUtils.isEmpty(operator)
+                || mTelephonyManager.getSimState(SubscriptionManager.getPhoneId(subId)) != TelephonyManager.SIM_STATE_READY) {
+            return;
+        }
+        /* @} */
         if (!TextUtils.isEmpty(operator)) {
             operator = String.format(" (%s)", operator);
         }
@@ -624,8 +633,17 @@ public class NotificationMgr {
         intent.setComponent(new ComponentName(
                 mContext.getString(R.string.mobile_network_settings_package),
                 mContext.getString(R.string.mobile_network_settings_class)));
+        /* @orig
         intent.putExtra(GsmUmtsOptions.EXTRA_SUB_ID, subId);
+        * UNISOC: Bug1144117 Correct the name of the extra data @{ */
+        intent.putExtra(Settings.EXTRA_SUB_ID, subId);
+        /* @} */
+        /* @orig
         builder.setContentIntent(PendingIntent.getActivity(mContext, 0, intent, 0));
+        * UNISOC: Bug1149770 Mention subId as the private request code @{ */
+        builder.setContentIntent(PendingIntent.getActivity(
+                mContext, subId, intent, PendingIntent.FLAG_IMMUTABLE));
+        /* @} */
         mNotificationManager.notifyAsUser(
                 Integer.toString(subId) /* tag */,
                 SELECTED_OPERATOR_FAIL_NOTIFICATION,
@@ -643,6 +661,17 @@ public class NotificationMgr {
                 Integer.toString(subId) /* tag */, SELECTED_OPERATOR_FAIL_NOTIFICATION,
                 UserHandle.ALL);
     }
+
+    /** UNISOC: 976997 Force cancel the network selection notification if it's not needed. @{*/
+    void forceCancelNetworkSelection() {
+        for (int i = 0; i < mTelephonyManager.getPhoneCount(); i++){
+            int[] subIds = SubscriptionManager.getSubId(i);
+            if (subIds != null && subIds.length >= 1) {
+                cancelNetworkSelection(subIds[0]);
+            }
+        }
+    }
+    /** @} */
 
     /**
      * Update notification about no service of user selected operator
@@ -755,6 +784,13 @@ public class NotificationMgr {
                 startPendingNetworkSelectionNotification(subId);
             }
         } else {
+            /* UNISOC: Add for Bug1133283 Remove all pending messages to avoid
+             * notification shows up when service state has changed to STATE_IN_SERVICE
+             * @{ */
+            if (mHandler.hasMessages(EVENT_PENDING_NETWORK_SELECTION_NOTIFICATION, subId)) {
+                mHandler.removeMessages(EVENT_PENDING_NETWORK_SELECTION_NOTIFICATION, subId);
+            }
+            /* @} */
             dismissNetworkSelectionNotification(subId);
         }
         mPreviousServiceState.put(subId, serviceState);
